@@ -1,0 +1,232 @@
+version: '3.8'
+
+networks:
+  stack-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mariadb_data:
+  forgejo-db-data:
+
+services:
+
+  traefik:
+    image: "traefik:v3.6.7"
+    container_name: "traefik"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - stack-net
+    command:
+      - "--api.insecure=true" 
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=stack-net"
+      - "--entryPoints.web.address=:80"
+      - "--log.level=DEBUG"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+  # Shared Postgres (Keycloak, Mattermost, Forgejo)
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgres:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - stack-net
+
+  # Shared MariaDB (Required for BookStack)
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: bookstack
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - stack-net
+
+  # ==========================================
+  # 2. THE MANAGER (Your SaaS Dashboard)
+  # ==========================================
+  
+  manager:
+    build: ./manager
+    container_name: manager
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - DOMAIN=${DOMAIN}
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN}
+      - KEYCLOAK_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_USER}
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./.env:/app/.env"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.manager.rule=Host(`dashboard.${DOMAIN}`)"
+      - "traefik.http.routers.manager.entrypoints=web"
+      - "traefik.http.services.manager.loadbalancer.server.port=3000"
+    networks:
+      - stack-net
+
+  # ==========================================
+  # 3. APPLICATION LAYER
+  # ==========================================
+
+  # IDENTITY: Keycloak (SSO)
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: keycloak
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_PROXY: "edge"      
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${DB_USER}
+      KC_DB_PASSWORD: ${DB_PASSWORD}
+      KC_HOSTNAME: auth.${DOMAIN}
+      KC_HOSTNAME_STRICT: "false"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=Host(`auth.${DOMAIN}`)"
+      - "traefik.http.routers.auth.entrypoints=web"
+      - "traefik.http.services.auth.loadbalancer.server.port=8080"
+    networks:
+      - stack-net
+
+  # CHAT: Mattermost
+  mattermost:
+    image: mattermost/mattermost-team-edition:9.5
+    container_name: mattermost
+    restart: unless-stopped
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: http://chat.${DOMAIN}
+      MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+      MM_SERVICESETTINGS_LOCALMODESOCKETLOCATION: "/mattermost/mattermost_local.socket"
+      
+      # 👇 SSO SETTINGS (Masquerading as GitLab)
+      MM_GITLABSETTINGS_ENABLE: "true"
+      MM_GITLABSETTINGS_ID: "mattermost-client"
+      MM_GITLABSETTINGS_SECRET: ${MATTERMOST_CLIENT_SECRET}
+      MM_GITLABSETTINGS_SCOPE: "openid"
+      # User's browser goes here (Public URL):
+      MM_GITLABSETTINGS_AUTHENDPOINT: "http://auth.${DOMAIN}/realms/startup-stack/protocol/openid-connect/auth"
+      # Mattermost backend talks to Keycloak backend here (Internal Docker URL):
+      MM_GITLABSETTINGS_TOKENENDPOINT: "http://keycloak:8080/realms/startup-stack/protocol/openid-connect/token"
+      MM_GITLABSETTINGS_USERAPIENDPOINT: "http://keycloak:8080/realms/startup-stack/protocol/openid-connect/userinfo"
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.chat.rule=Host(`chat.${DOMAIN}`)"
+      - "traefik.http.routers.chat.entrypoints=web"
+      - "traefik.http.services.chat.loadbalancer.server.port=8065" 
+    networks:
+      - stack-net
+
+  # GIT: Forgejo
+  forgejo-db:
+    image: postgres:14-alpine
+    container_name: forgejo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: forgejo
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: forgejo
+    volumes:
+      - forgejo-db-data:/var/lib/postgresql/data
+    networks:
+      - stack-net
+
+  # 2. Updated Forgejo Service
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:9
+    container_name: forgejo
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      
+      # Database Connection (Connects to the dedicated DB above)
+      - FORGEJO__database__DB_TYPE=postgres
+      - FORGEJO__database__HOST=forgejo-db:5432
+      - FORGEJO__database__NAME=forgejo
+      - FORGEJO__database__USER=forgejo
+      - FORGEJO__database__PASSWD=${DB_PASSWORD}
+      
+      # Server Settings (CRITICAL for SSO redirects)
+      - FORGEJO__server__DOMAIN=git.${DOMAIN}
+      - FORGEJO__server__ROOT_URL=http://git.${DOMAIN}/
+      - FORGEJO__server__HTTP_PORT=3000
+      
+    volumes:
+      - ./data/forgejo:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - forgejo-db
+    ports:
+      - "2222:22" # SSH Port
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.git.rule=Host(`git.${DOMAIN}`)"
+      - "traefik.http.routers.git.entrypoints=web"
+      - "traefik.http.services.git.loadbalancer.server.port=3000"
+    networks:
+      - stack-net
+
+  # WIKI: BookStack
+  bookstack:
+    image: lscr.io/linuxserver/bookstack:latest
+    container_name: bookstack
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - APP_URL=http://wiki.${DOMAIN}
+      - DB_HOST=mariadb
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASSWORD}
+      - DB_DATABASE=bookstack
+    depends_on:
+      - mariadb
+    volumes:
+      - ./data/bookstack_config:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wiki.rule=Host(`wiki.${DOMAIN}`)"
+      - "traefik.http.routers.wiki.entrypoints=web"
+    networks:
+      - stack-net

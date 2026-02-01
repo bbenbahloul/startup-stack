@@ -1,0 +1,36 @@
+/* manager/client/src/index.css */
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* Force Light Mode variables */
+  color-scheme: light;
+  color: #333333;
+  background-color: #f4f4f4;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  display: block; /* Vite sets this to flex by default, which breaks our layout */
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+/* Reset buttons to look normal */
+button {
+  font-family: inherit;
+  font-size: 100%;
+  line-height: 1.15;
+  margin: 0;
+}
+
+/* Make links behave */
+a {
+  text-decoration: none;
+}

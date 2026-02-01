@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+manager/node_modules/
+manager/client/node_modules/
+
+# Environment Variables (CRITICAL)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+manager/.env
+manager/client/.env
+
+.continue/
+
+data/
+
+# Build Outputs (React/Vite)
+dist/
+build/
+manager/client/dist/
+manager/client/build/
+
+# Application Specific
+installed.lock
+manager/installed.lock
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# IDE & OS Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
